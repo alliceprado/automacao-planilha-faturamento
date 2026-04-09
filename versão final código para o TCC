@@ -1,0 +1,306 @@
+# -*- coding: utf-8 -*-
+
+# PENDOC
+
+pip install pandas
+pip install openpyxl
+#%%
+import pandas as pd
+import os
+from datetime import datetime
+from openpyxl import load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+import warnings
+from pathlib import Path
+from datetime import datetime
+from math import ceil
+#%%
+
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+
+#%% ===============================
+# Ler configuração do OneDrive
+# ===============================
+df_config = pd.read_excel("tabelas_auxiliares.xlsx", sheet_name="config")
+config = dict(zip(df_config["Chave"], df_config["Valor"]))
+
+pasta_base = Path(config["pasta_base"])
+pasta_individuais = Path(config["pasta_individuais"])
+
+#%% ===============================
+#etapa1_combinar_bases
+# ===============================
+
+# 1. Definições iniciais
+ARQUIVO_NOVO = "data.xlsx"
+ARQUIVO_AUX = "tabelas_auxiliares.xlsx"
+DATA_HOJE = datetime.today().strftime("%d.%m.%Y")
+ARQUIVO_FINAL = pasta_base / f"PENDOC INICIAL {DATA_HOJE}.xlsx"
+
+# 2. Carregar base nova (Power BI)
+nova_base = pd.read_excel(ARQUIVO_NOVO)
+
+# 3. Filtrar somente 'Fiat Services'
+nova_base = nova_base[nova_base['desc_pendoc'] == 'Fiat Services'].copy()
+
+# 4. Selecionar e renomear colunas
+colunas_renomeadas = {
+    'dat_criacao_pedido_faturamento': 'DATA',
+    'cod_regiao': 'COD REGIÃO',
+    'num_pedido_comercial': 'num_pedido_comercial',
+    'cod_cliente_faturamento_7dg': 'cod_cliente_faturamento_7dg',
+    'nom_cliente_faturamento': 'nom_cliente_faturamento',
+    'cod_categoria_cliente_faturamento': 'Categoria',
+    'cod_modelo': 'MOD',
+    'des_marca': 'BRAND',
+    'cod_ceve': 'CEVE'
+}
+
+nova_base = nova_base[list(colunas_renomeadas.keys())]
+nova_base.rename(columns=colunas_renomeadas, inplace=True)
+
+# 5. Ajuste de tipo de data
+nova_base['DATA'] = pd.to_datetime(nova_base['DATA']).dt.strftime('%d/%m/%Y')
+
+# 6. Adicionar coluna Dias (diferença entre DATA e hoje)
+nova_base['Dias'] = (
+    pd.to_datetime(datetime.today().strftime('%d/%m/%Y'), dayfirst=True) -
+    pd.to_datetime(nova_base['DATA'], format='%d/%m/%Y')
+).dt.days
+
+# 7. Adicionar coluna Prioridade
+nova_base['Prioridade'] = nova_base['CEVE'].apply(
+    lambda x: '00_CEVE' if pd.notna(x) and str(x).strip() != '' else '01_Business (01º Lote)'
+)
+
+# 8. Merge com abas auxiliares
+# Categoria Desc
+categorias_df = pd.read_excel(ARQUIVO_AUX, sheet_name='categorias')
+nova_base = nova_base.merge(categorias_df, how='left', on='Categoria')
+
+# Regional
+regionais_df = pd.read_excel(ARQUIVO_AUX, sheet_name='regionais')
+nova_base = nova_base.merge(regionais_df, how='left', on='COD REGIÃO')
+
+# 9. Adicionar colunas vazias
+nova_base['STATUS GERAL'] = ''
+nova_base['CAUSAL'] = ''
+nova_base['RESPONSAVEL'] = ''
+coluna_hoje_nome = datetime.today().strftime('%d/%m/%y')
+nova_base[coluna_hoje_nome] = ''
+
+# 10. Reorganizar colunas
+colunas_finais = [
+    'num_pedido_comercial',
+    'cod_cliente_faturamento_7dg',
+    'nom_cliente_faturamento',
+    'BRAND',
+    'MOD',
+    'DATA',
+    'Categoria',
+    'CEVE',
+    'Dias',
+    'Categoria Desc',
+    'Prioridade',
+    'COD REGIÃO',
+    'REGIONAL',
+    'STATUS GERAL',
+    'CAUSAL',
+    'RESPONSAVEL',
+    coluna_hoje_nome
+]
+nova_base = nova_base[colunas_finais]
+
+# 11. Salvar Excel
+nova_base.to_excel(ARQUIVO_FINAL, sheet_name="Planilha1", index=False)
+
+# 12. Aplicar validações no Excel (STATUS GERAL + HOJE no título)
+wb = load_workbook(ARQUIVO_FINAL)
+ws = wb.active
+
+# Adicionar =HOJE() na célula do título da última coluna
+ultima_coluna = ws.max_column
+coluna_letra = chr(64 + ultima_coluna)
+ws[f"{coluna_letra}1"].value = "=HOJE()"
+
+# Limpar STATUS GERAL antes de aplicar validação
+for row in range(2, ws.max_row + 1):
+    ws[f"N{row}"].value = ""
+
+# Criar e aplicar validação de dados
+dv = DataValidation(
+    type="list",
+    formula1='"Liberado,Recusado,Em analise,Juridico,Liberação Automática,Excluido"',
+    allow_blank=True,
+    showDropDown=True
+)
+dv.add(f"N2:N{ws.max_row}")
+ws.add_data_validation(dv)
+
+# Salvar alterações
+wb.save(ARQUIVO_FINAL)
+
+print(f"Arquivo final salvo como: {ARQUIVO_FINAL}")
+
+#%% ===============================
+# Etapa 3 - Divisão ÚNICA por colaborador
+# ===============================
+
+# ===============================
+# Ler configuração
+# ===============================
+ARQUIVO_AUX = "tabelas_auxiliares.xlsx"
+df_config = pd.read_excel(ARQUIVO_AUX, sheet_name="config")
+config = dict(zip(df_config["Chave"], df_config["Valor"]))
+
+pasta_base = Path(config["pasta_base"])
+pasta_individuais = Path(config["pasta_individuais"])
+
+data_atual = datetime.today().strftime("%d.%m.%Y")
+arquivo_inicial = pasta_base / f"PENDOC INICIAL {data_atual}.xlsx"
+
+if not arquivo_inicial.exists():
+    raise FileNotFoundError(f"❌ Arquivo base não encontrado: {arquivo_inicial}")
+
+# Ler base
+base = pd.read_excel(arquivo_inicial, sheet_name="Planilha1")
+base["num_pedido_comercial"] = base["num_pedido_comercial"].astype(str).str.strip()
+base["Categoria"] = base["Categoria"].astype(str)
+
+# Ler responsáveis
+df_resp = pd.read_excel(ARQUIVO_AUX, sheet_name="responsavel")
+df_resp = df_resp[df_resp["ATIVO"].astype(str).str.lower().isin(["sim","1","ativo","s"])]
+
+# Mapeamento colaborador → categorias
+colaboradores = []
+for _, row in df_resp.iterrows():
+    categorias = [
+        str(col)
+        for col in df_resp.columns
+        if col not in ["NOME","ATIVO"] and str(row[col]).strip().lower() in ["1","x","sim"]
+    ]
+    colaboradores.append({
+        "nome": row["NOME"],
+        "categorias": categorias
+    })
+
+# Base que será consumida
+base_disponivel = base.copy()
+
+modelo_path = pasta_individuais / "modelo_individual.xlsx"
+
+total_colabs = len(colaboradores)
+
+for idx, colab in enumerate(colaboradores, start=1):
+    nome = colab["nome"]
+    categorias = colab["categorias"]
+
+    if base_disponivel.empty or not categorias:
+        continue
+
+    # Demandas que esse colaborador pode analisar
+    elegiveis = base_disponivel[
+        base_disponivel["Categoria"].isin(categorias)
+    ].copy()
+
+    if elegiveis.empty:
+        continue
+
+    # Quantidade proporcional
+    qtd = ceil(len(base_disponivel) / (total_colabs - idx + 1))
+
+    df_atribuido = elegiveis.head(qtd)
+
+    if df_atribuido.empty:
+        continue
+
+    arquivo_colab = pasta_individuais / f"{nome}.xlsx"
+
+    # Dia novo → sobrescreve
+    wb = load_workbook(modelo_path)
+    ws = wb.active
+
+    for i, (_, row) in enumerate(df_atribuido.iterrows(), start=2):
+        for j, col in enumerate(df_atribuido.columns, start=1):
+            ws.cell(row=i, column=j, value=row[col])
+
+    wb.save(arquivo_colab)
+
+    # 🔥 REMOVE DA BASE DISPONÍVEL
+    base_disponivel = base_disponivel[
+        ~base_disponivel["num_pedido_comercial"]
+        .isin(df_atribuido["num_pedido_comercial"])
+    ]
+
+    print(f"✅ {nome}: {len(df_atribuido)} demandas")
+
+print("\n🎉 Etapa 3 finalizada SEM duplicações")
+print(f"📉 Demandas não atribuídas: {len(base_disponivel)}")
+#%% ===============================
+# Etapa 4 - Consolidar status
+# ===============================
+
+# Ler configuração do OneDrive
+ARQUIVO_AUX = "tabelas_auxiliares.xlsx"
+df_config = pd.read_excel(ARQUIVO_AUX, sheet_name="config")
+config = dict(zip(df_config["Chave"], df_config["Valor"]))
+
+pasta_base = Path(config["pasta_base"])
+pasta_individuais = Path(config["pasta_individuais"])
+
+data_atual = datetime.today().strftime("%d.%m.%Y")
+arquivo_inicial = pasta_base / f"PENDOC INICIAL {data_atual}.xlsx"
+arquivo_final = pasta_base / f"PENDOC {data_atual}.xlsx"
+
+if not arquivo_inicial.exists():
+    raise FileNotFoundError(f"❌ Arquivo inicial não encontrado: {arquivo_inicial}")
+
+# ===============================
+# 1. Ler base inicial
+# ===============================
+df_base = pd.read_excel(arquivo_inicial, sheet_name="Planilha1")
+
+df_base["num_pedido_comercial"] = (
+    df_base["num_pedido_comercial"].astype(str).str.strip()
+)
+
+# ===============================
+# 2. Consolidar arquivos individuais
+# ===============================
+arquivos_individuais = list(pasta_individuais.glob("*.xlsx"))
+
+for arquivo in arquivos_individuais:
+    if arquivo.name.lower().startswith("modelo"):
+        continue
+
+    df_temp = pd.read_excel(arquivo)
+
+    if "num_pedido_comercial" not in df_temp.columns:
+        continue
+
+    df_temp["num_pedido_comercial"] = (
+        df_temp["num_pedido_comercial"].astype(str).str.strip()
+    )
+
+    responsavel = arquivo.stem
+    df_temp["RESPONSAVEL"] = responsavel
+
+    # 🔁 Merge seguro
+    df_base = df_base.merge(
+        df_temp[
+            ["num_pedido_comercial", "STATUS GERAL", "CAUSAL", "Prioridade", "RESPONSAVEL"]
+        ],
+        on="num_pedido_comercial",
+        how="left",
+        suffixes=("", "_novo")
+    )
+
+    for col in ["STATUS GERAL", "CAUSAL", "Prioridade", "RESPONSAVEL"]:
+        df_base[col] = df_base[f"{col}_novo"].combine_first(df_base[col])
+        df_base.drop(columns=[f"{col}_novo"], inplace=True)
+
+# ===============================
+# 3. Salvar consolidado
+# ===============================
+df_base.to_excel(arquivo_final, sheet_name="Planilha1", index=False)
+print(f"\n✅ Arquivo consolidado atualizado: {arquivo_final}")
